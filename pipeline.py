@@ -359,20 +359,25 @@ def montar_subs(cidade, dados):
     for i, ano in enumerate(anos_e, start=1):
         subs[f"{{{{ANO{i}}}}}"] = str(ano)
 
-    # Bairros
+    # Bairros — colunas do template:
+    #   col1=pop_total  col2=pop_target  col3=tt_privadas  col4=penetracao
+    #   col5-11=classes sociais (% sobre pop_total, já formatadas como "X%")
     tabela = dados.get("bairros", {}).get("tabela", [])
     for i, row in enumerate(tabela[:6], start=1):
         n = str(i)
-        subs[f"{{{{BAIRRO{n}}}}}"]       = safe(row.get("bairro", ""))
-        subs[f"{{{{POP_TOTAL_B{n}}}}}"]  = safe(fmt_num(row.get("pop_total", "")))
-        subs[f"{{{{POP_TARGET_B{n}}}}}"] = safe(fmt_num(row.get("pop_target", "")))
-        subs[f"{{{{TT_MAT_B{n}}}}}"]     = safe(fmt_num(row.get("tt_matriculas", "")))
-        subs[f"{{{{PENETRACAO_B{n}}}}}"] = safe(row.get("penetracao", ""))
-        subs[f"{{{{TT_PRIV_B{n}}}}}"]    = safe(fmt_num(row.get("tt_privadas", "")))
-        subs[f"{{{{TT_PART_B{n}}}}}"]    = safe(fmt_num(row.get("tt_privadas", "")))
-        subs[f"{{{{TT_PUB_B{n}}}}}"]     = safe(fmt_num(row.get("tt_publicas", "")))
-        subs[f"{{{{PCT_PART_B{n}}}}}"]   = safe(row.get("pct_privadas", ""))
-        subs[f"{{{{PCT_PUB_B{n}}}}}"]    = safe(row.get("pct_publicas", ""))
+        subs[f"{{{{BAIRRO{n}}}}}"]           = safe(row.get("bairro", ""))
+        subs[f"{{{{POP_TOTAL_B{n}}}}}"]      = safe(fmt_num(row.get("pop_total",  0)))
+        subs[f"{{{{POP_TARGET_B{n}}}}}"]     = safe(fmt_num(row.get("pop_target", 0)))
+        subs[f"{{{{TT_PRIV_B{n}}}}}"]        = safe(fmt_num(row.get("tt_privadas", 0)))
+        subs[f"{{{{TT_PART_B{n}}}}}"]        = safe(fmt_num(row.get("tt_privadas", 0)))
+        subs[f"{{{{PENETRACAO_B{n}}}}}"]     = safe(row.get("penetracao", "—"))
+        subs[f"{{{{PCT_APP_B{n}}}}}"]        = safe(row.get("pct_classe_App", "0%"))
+        subs[f"{{{{PCT_AP_B{n}}}}}"]         = safe(row.get("pct_classe_Ap",  "0%"))
+        subs[f"{{{{PCT_B1_B{n}}}}}"]         = safe(row.get("pct_classe_B1",  "0%"))
+        subs[f"{{{{PCT_B2_B{n}}}}}"]         = safe(row.get("pct_classe_B2",  "0%"))
+        subs[f"{{{{PCT_C1_B{n}}}}}"]         = safe(row.get("pct_classe_C1",  "0%"))
+        subs[f"{{{{PCT_C2_B{n}}}}}"]         = safe(row.get("pct_classe_C2",  "0%"))
+        subs[f"{{{{PCT_DE_B{n}}}}}"]         = safe(row.get("pct_classe_D_E", "0%"))
 
     # ── Colégios: {{COLEGIO1}}..{{COLEGIO15}} (eixo X dos charts 10-13) ──
     for fase_key in ['infantil', 'fund1', 'fund2', 'medio']:
@@ -404,6 +409,17 @@ CHART_MAP = {
 # Colunas: [nome_microarea, pop_total, pop_target, tt_matriculas, penetracao]
 # ─────────────────────────────────────────────────────
 def atualizar_tabela_microareas(xml_bytes, dados):
+    """
+    Slide 1 — tabela de microáreas.
+    Estrutura real do template (inspecionada via XML):
+      Tabela 0: 6 linhas de dados, SEM linha de cabeçalho.
+        col 0: {{BAIRRO1}}..{{BAIRRO6}} — substituído por substituir_texto, não tocar
+        col 1: pop_total
+        col 2: pop_target (<19 anos)
+        col 3: tt_privadas
+        col 4: penetracao
+      Tabela 1: cabeçalho separado (1 linha com placeholders de label).
+    """
     tabela = dados.get("bairros", {}).get("tabela", [])
     if not tabela:
         return xml_bytes
@@ -413,30 +429,25 @@ def atualizar_tabela_microareas(xml_bytes, dados):
     if not tables:
         return xml_bytes
 
-    tbl = tables[0]  # primeira tabela = dados por microárea
+    tbl = tables[0]  # tabela de dados (sem cabeçalho)
     rows = tbl.findall(f"{{{NS_A}}}tr")
 
-    for r_idx, row in enumerate(rows):
+    for r_idx, row in enumerate(rows):  # row 0 = primeira microárea (sem pular)
         if r_idx >= len(tabela):
             break
         ma = tabela[r_idx]
         cells = row.findall(f"{{{NS_A}}}tc")
 
-        # col 0: nome da microárea — já coberto por {{BAIRRO1}} etc. em substituir_texto
-        # col 1: pop_total
-        # col 2: pop_target (<19 anos)
-        # col 3: tt_matriculas (total público + privado)
-        # col 4: penetração
-        valores = [
-            None,  # col 0: não tocar — substituído por subs
-            fmt_num(ma.get("pop_total", 0)),
-            fmt_num(ma.get("pop_target", 0)),
-            fmt_num(ma.get("tt_matriculas", 0)),
-            ma.get("penetracao", "—"),
-        ]
+        # col 0: {{BAIRRO}} já substituído por substituir_texto — não tocar
+        valores = {
+            1: fmt_num(ma.get("pop_total",   0)),
+            2: fmt_num(ma.get("pop_target",  0)),
+            3: fmt_num(ma.get("tt_privadas", 0)),
+            4: ma.get("penetracao", "—"),
+        }
 
         for c_idx, cell in enumerate(cells):
-            if c_idx == 0 or valores[c_idx] is None:
+            if c_idx not in valores:
                 continue
             t_els = list(cell.iter(f"{{{NS_A}}}t"))
             if t_els:
@@ -461,6 +472,27 @@ def atualizar_tabela_microareas(xml_bytes, dados):
 #           mas os valores ficam nas colunas 11-17 de cada linha de dados
 # ─────────────────────────────────────────────────────
 def atualizar_tabela_slide2(xml_bytes, dados):
+    """
+    Slide 2 — tabela de caracterização dos mercados.
+    Estrutura real do template (inspecionada via XML):
+      1 tabela, 7 linhas:
+        row 0: cabeçalho com placeholders de label — não tocar
+        rows 1-6: dados das microáreas (14 colunas cada)
+          col 0 : {{BAIRRO1}}..{{BAIRRO6}} — substituído por substituir_texto, não tocar
+          col 1 : pop_total
+          col 2 : pop_target (<19 anos)
+          col 3 : tt_privadas
+          col 4 : penetracao
+          col 5 : separador vazio — não tocar
+          col 6 : separador vazio — não tocar
+          col 7 : pct_classe_App (A++)
+          col 8 : pct_classe_Ap  (A+)
+          col 9 : pct_classe_B1
+          col 10: pct_classe_B2
+          col 11: pct_classe_C1
+          col 12: pct_classe_C2
+          col 13: pct_classe_D_E (D+E)
+    """
     tabela = dados.get("bairros", {}).get("tabela", [])
     if not tabela:
         return xml_bytes
@@ -473,28 +505,19 @@ def atualizar_tabela_slide2(xml_bytes, dados):
     tbl = tables[0]
     rows = tbl.findall(f"{{{NS_A}}}tr")
 
-    # Mapa de índice de coluna → chave no dict da microárea
-    # col 0: nome (via subs, não tocar)
     COL_MAP = {
-        1:  ("pop_total",    fmt_num),
-        2:  ("pop_target",   fmt_num),
-        3:  ("tt_matriculas",fmt_num),
-        4:  ("penetracao",   str),
-        6:  ("tt_privadas",  fmt_num),
-        7:  ("tt_publicas",  fmt_num),
-        8:  ("pct_privadas", str),
-        9:  ("pct_publicas", str),
-    }
-    # Classes sociais: cols 11-17 → A++ A+ B1 B2 C1 C2 D/E
-    # Chaves batem com data_fetcher: pct_classe_App, pct_classe_Ap, etc.
-    CLASS_COLS = {
-        11: "pct_classe_App",
-        12: "pct_classe_Ap",
-        13: "pct_classe_B1",
-        14: "pct_classe_B2",
-        15: "pct_classe_C1",
-        16: "pct_classe_C2",
-        17: "pct_classe_D_E",
+        1:  ("pop_total",       fmt_num),
+        2:  ("pop_target",      fmt_num),
+        3:  ("tt_privadas",     fmt_num),
+        4:  ("penetracao",      str),
+        # cols 5-6: separadores — não tocar
+        7:  ("pct_classe_App",  str),
+        8:  ("pct_classe_Ap",   str),
+        9:  ("pct_classe_B1",   str),
+        10: ("pct_classe_B2",   str),
+        11: ("pct_classe_C1",   str),
+        12: ("pct_classe_C2",   str),
+        13: ("pct_classe_D_E",  str),
     }
 
     def set_cell(cell, value):
@@ -504,10 +527,9 @@ def atualizar_tabela_slide2(xml_bytes, dados):
             for t in t_els[1:]:
                 t.text = ""
 
-    # Linhas 1-6 = dados das microáreas (linha 0 = cabeçalho)
     for r_idx, row in enumerate(rows):
         if r_idx == 0:
-            continue  # cabeçalho — coberto por subs
+            continue  # cabeçalho
         ma_idx = r_idx - 1
         if ma_idx >= len(tabela):
             break
@@ -517,12 +539,7 @@ def atualizar_tabela_slide2(xml_bytes, dados):
         for c_idx, cell in enumerate(cells):
             if c_idx in COL_MAP:
                 chave, fmt = COL_MAP[c_idx]
-                valor = ma.get(chave, 0)
-                set_cell(cell, fmt(valor))
-            elif c_idx in CLASS_COLS:
-                chave_pct = CLASS_COLS[c_idx]
-                valor = ma.get(chave_pct, "—")
-                set_cell(cell, str(valor))
+                set_cell(cell, fmt(ma.get(chave, 0)))
 
     return etree.tostring(tree, xml_declaration=True, encoding="UTF-8", standalone=True)
 
