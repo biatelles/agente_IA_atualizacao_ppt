@@ -4,21 +4,21 @@ import os
 # PATHS
 # ==========================================================
 
-TEMPLATE_PATH = r"C:\Python DSA\Agentes de IA\(UNIFAA) Expansão Barra Mansa_VF (1).pptx"
-OUTPUT_DIR    = r"C:\Python DSA\Agentes de IA\output"
+TEMPLATE_PATH = r"CAMINHO DO ARQUIVO MODELO AQUI"
+OUTPUT_DIR    = r"CAMINHO DO OUTPUT AQUI"
 
 # Censo Escolar
-CENSO_PATH = r"C:\Python DSA\Agentes de IA\Censo Escolar_10-25_Resumido.xlsx"
+CENSO_PATH = r"CAMINHO DA BASE DE DADOS AQUI"
 
 # base_completa: Código INEP → Microárea / Município / Estado
-BASE_COMPLETA_PATH          = r"C:\Python DSA\Agentes de IA\base_completa.xlsx"
+BASE_COMPLETA_PATH          = r"CAMINHO DA BASE DE DADOS AQUI"
 BASE_COMPLETA_COL_INEP      = "Código INEP"
 BASE_COMPLETA_COL_MICROAREA = "Microárea"
 BASE_COMPLETA_COL_MUNICIPIO = "Município"
 BASE_COMPLETA_COL_ESTADO    = "Estado"
 
 # Microáreas: dados demográficos por microárea (CSV separado por ;)
-MICROAREAS_PATH              = r"C:\Python DSA\Agentes de IA\Microáreas.xlsx"
+MICROAREAS_PATH              = r"CAMINHO DA BASE DE DADOS AQUI"
 MICROAREAS_ENCODING          = "latin-1"
 MICROAREAS_SEP               = ";"
 MICROAREAS_COL_MICROAREA     = "Microáreas"
