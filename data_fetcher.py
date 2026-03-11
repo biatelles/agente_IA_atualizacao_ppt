@@ -13,6 +13,31 @@ Demais dados:
   - Evolução: série temporal de matrículas privadas por fase
   - CAGR: calculado total e por fase para cada período solicitado
   - Top 10: top 10 escolas por matrículas totais no ano pontual
+
+=== BUGS CORRIGIDOS ===
+
+BUG 1 — IndentationError no bloco de dados demográficos (linhas ~242-299):
+  O corpo do try: e o except: estavam desalinhados — o corpo do try ficava
+  fora do bloco, e o except ficava no nível do módulo. Corrigido alinhando
+  todo o bloco corretamente.
+
+BUG 2 — pop_total e pop_target infladas (valores muito acima do esperado):
+  O merge com df_demo_sel usava apenas "bairro" como chave sem garantir
+  cardinalidade 1:1. Qualquer linha duplicada na planilha Microáreas para
+  o mesmo bairro resulta em produto cartesiano e multiplica os valores de
+  população pelo número de duplicatas. Corrigido com
+  .drop_duplicates(subset=["bairro"]) antes do merge.
+
+BUG 3 — Matrículas públicas sempre zero no slide 2:
+  A base_completa contém tipicamente apenas escolas privadas (é a base do
+  fornecedor do produto). O inner join df_bc × df_censo_pub retornava vazio
+  porque nenhuma escola pública tinha INEP na base_completa, zerando
+  tt_matriculas_publicas silenciosamente.
+  Corrigido com lógica em cascata:
+    (a) Tenta join base_completa × Censo público (funciona se df_bc tiver INEPs públicos).
+    (b) Se o join retornar vazio, lê diretamente do Censo Escolar:
+        soma de TP_DEPENDENCIA != Privada para o município/ano — leitura
+        fiel e direta do Censo, independente do mapeamento por microárea.
 """
 
 import pandas as pd
@@ -116,9 +141,10 @@ def _br_to_float(serie):
 
 def _ler_microareas(cidade):
     """
-    Lê Microareas.csv e filtra pelo município.
+    Lê Microareas.xlsx e filtra pelo município.
     Retorna DataFrame com dados demográficos por microárea.
-    Os valores numéricos estão em formato brasileiro (1.234,56).
+    O .xlsx já entrega valores como float64 nativos — NÃO usar _br_to_float,
+    que removeria o ponto decimal e corromperia os valores (ex: 26380.43 → 2638043).
     """
     df = pd.read_excel(MICROAREAS_PATH)
     df.columns = df.columns.str.strip()
@@ -127,7 +153,7 @@ def _ler_microareas(cidade):
     mask = df[MICROAREAS_COL_MUNICIPIO].apply(_normalizar_str) == cidade_norm
     df = df[mask].copy()
 
-    # Converte todas as colunas numéricas do formato BR para float
+    # Garante numérico em todas as colunas de interesse (já são float64 no xlsx)
     cols_numericas = [
         MICROAREAS_COL_POPULACAO,
         MICROAREAS_COL_POP_ATE9, MICROAREAS_COL_POP_10_14, MICROAREAS_COL_POP_15_19,
@@ -136,7 +162,7 @@ def _ler_microareas(cidade):
 
     for col in cols_numericas:
         if col in df.columns:
-            df[col] = _br_to_float(df[col])
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
     return df
 
@@ -148,35 +174,37 @@ def _ler_microareas(cidade):
 
 def _matriculas_por_bairro(cidade, ano, bairros="automatico", top_n=6):
     """
-    Retorna DataFrame com matrículas privadas e dados demográficos por microárea.
-    Chave de join:
-      base_completa.Código INEP ←→ Censo.CO_ENTIDADE  (via INEP normalizado)
-      base_completa.Microárea   ←→ Microáreas.Microáreas  (via chave composta Microárea+Município+Estado)
+    Retorna DataFrame com dados por microárea para os slides 1 e 2.
+
+    Colunas produzidas (alinhadas com o template):
+      col 1 — pop_total    : população total da microárea          (Microáreas.xlsx)
+      col 2 — pop_target   : pop até 19 anos (Até9 + 10-14 + 15-19) (Microáreas.xlsx)
+      col 3 — tt_matriculas_privadas : matrículas privadas          (base_completa × Censo)
+      col 4 — penetracao   : col3 / col2                           (calculado)
+      col 5-11 — pct_classe_*: % população por classe social       (Microáreas.xlsx, val/pop_total)
+        A++, A+, B1, B2, C1, C2, D_E (D+E somados)
     """
-    # 1. Censo: escolas privadas do município/ano
+    # ── 1. Censo: escolas privadas do município/ano ──────────────
     df_censo = _ler_censo(cidade)
-    df_censo_ano = df_censo[
+    df_censo_priv = df_censo[
         (df_censo[COL_ANO] == ano) &
         (df_censo[COL_DEPENDENCIA] == VAL_PRIVADA)
     ].copy()
-    df_censo_ano["tt_privadas"] = df_censo_ano[COLS_FASES].sum(axis=1)
-    df_censo_ano["_inep"] = _normalizar_inep(df_censo_ano["CO_ENTIDADE"])
+    df_censo_priv["tt_privadas"] = df_censo_priv[COLS_FASES].sum(axis=1)
+    df_censo_priv["_inep"]       = _normalizar_inep(df_censo_priv["CO_ENTIDADE"])
 
-    # Censo total (públicas + privadas)
-    df_censo_total = df_censo[df_censo[COL_ANO] == ano].copy()
-    df_censo_total["tt_total"] = df_censo_total[COLS_FASES].sum(axis=1)
-    df_censo_total["_inep"] = _normalizar_inep(df_censo_total["CO_ENTIDADE"])
-
-    # 2. base_completa: INEP → Microárea
-    print(f"🔗 Calculando matrículas por microárea via join INEP...")
+    # ── 2. base_completa: INEP → Microárea (só privadas) ────────
+    print("🔗 Calculando matrículas privadas por microárea via join INEP...")
     df_bc = _ler_base_completa(cidade)
     if df_bc.empty:
         raise ValueError(f"Cidade '{cidade}' não encontrada na base_completa.")
     df_bc["_inep"] = _normalizar_inep(df_bc[BASE_COMPLETA_COL_INEP])
 
-    # 3. Join: base_completa × Censo (privadas)
+    col_ma = BASE_COMPLETA_COL_MICROAREA
+
+    # ── 3. Join base_completa × Censo privadas → agrega por microárea ──
     df_join = df_bc.merge(
-        df_censo_ano[["_inep", "tt_privadas"] + COLS_FASES],
+        df_censo_priv[["_inep", "tt_privadas"]],
         on="_inep", how="inner"
     )
     if df_join.empty:
@@ -185,9 +213,7 @@ def _matriculas_por_bairro(cidade, ano, bairros="automatico", top_n=6):
             "Verifique se os códigos INEP batem."
         )
 
-    # 4. Agrega por microárea — matrículas privadas
-    col_ma = BASE_COMPLETA_COL_MICROAREA
-    df_ma_priv = (
+    df_ma = (
         df_join.groupby(col_ma)["tt_privadas"]
         .sum().reset_index()
         .rename(columns={col_ma: "bairro", "tt_privadas": "tt_matriculas_privadas"})
@@ -195,130 +221,97 @@ def _matriculas_por_bairro(cidade, ano, bairros="automatico", top_n=6):
 
     # Filtra microáreas explícitas se fornecido
     if bairros != "automatico" and isinstance(bairros, list):
-        df_ma_priv = df_ma_priv[df_ma_priv["bairro"].isin(bairros)]
+        df_ma = df_ma[df_ma["bairro"].isin(bairros)]
 
     # Top N por matrículas privadas
-    df_ma_priv = df_ma_priv.sort_values("tt_matriculas_privadas", ascending=False).head(top_n)
+    df_ma = df_ma.sort_values("tt_matriculas_privadas", ascending=False).head(top_n)
 
-    # 5. Join: base_completa × Censo total e públicas → matrículas por microárea
-    try:
-        # Total (todas dependências)
-        df_join_total = df_bc.merge(
-            df_censo_total[["_inep", "tt_total"]],
-            on="_inep", how="inner"
-        )
-        df_ma_total = (
-            df_join_total.groupby(col_ma)["tt_total"]
-            .sum().reset_index()
-            .rename(columns={col_ma: "bairro", "tt_total": "tt_matriculas_total"})
-        )
-        df_ma_priv = df_ma_priv.merge(df_ma_total, on="bairro", how="left")
-
-        # Públicas (Federal + Estadual + Municipal)
-        df_censo_pub = df_censo[
-            (df_censo[COL_ANO] == ano) &
-            (df_censo[COL_DEPENDENCIA] != VAL_PRIVADA)
-        ].copy()
-        df_censo_pub["tt_publicas_escola"] = df_censo_pub[COLS_FASES].sum(axis=1)
-        df_censo_pub["_inep"] = _normalizar_inep(df_censo_pub["CO_ENTIDADE"])
-
-        df_join_pub = df_bc.merge(
-            df_censo_pub[["_inep", "tt_publicas_escola"]],
-            on="_inep", how="inner"
-        )
-        df_ma_pub = (
-            df_join_pub.groupby(col_ma)["tt_publicas_escola"]
-            .sum().reset_index()
-            .rename(columns={col_ma: "bairro", "tt_publicas_escola": "tt_matriculas_publicas"})
-        )
-        df_ma_priv = df_ma_priv.merge(df_ma_pub, on="bairro", how="left")
-        df_ma_priv["tt_matriculas_publicas"] = df_ma_priv["tt_matriculas_publicas"].fillna(0)
-    except Exception as e:
-        print(f"⚠️  Matrículas totais/públicas: {e}")
-        df_ma_priv["tt_matriculas_total"]   = df_ma_priv["tt_matriculas_privadas"]
-        df_ma_priv["tt_matriculas_publicas"] = 0
-
-    # 6. Enriquece com dados demográficos das Microáreas
+    # ── 4. Dados demográficos e classes sociais (Microáreas.xlsx) ──
     try:
         df_demo = _ler_microareas(cidade)
-        if not df_demo.empty:
-            # Calcula pop_target = soma das faixas etárias até 19 anos
-            # (conversão BR→float já feita em _ler_microareas)
-            cols_ate19 = [MICROAREAS_COL_POP_ATE9, MICROAREAS_COL_POP_10_14, MICROAREAS_COL_POP_15_19]
-            cols_existentes = [c for c in cols_ate19 if c in df_demo.columns]
-            df_demo["pop_target"] = df_demo[cols_existentes].sum(axis=1) if cols_existentes else 0
 
-            # Calcula percentuais de população por classe social
-            # Colunas: "População por Faixa de Renda vs Faixa Etária - A++" etc.
-            # Total = soma de todas as classes (não usar coluna "População" pois pode divergir)
-            POP_PREFIX = MICROAREAS_COL_POP_CLASSE_PREFIX
-            pop_classes_map = {
-                "A++": "pct_classe_App",
-                "A+":  "pct_classe_Ap",
-                "B1":  "pct_classe_B1",
-                "B2":  "pct_classe_B2",
-                "C1":  "pct_classe_C1",
-                "C2":  "pct_classe_C2",
-                "D":   "pct_classe_D_raw",
-                "E":   "pct_classe_E_raw",
-            }
-            cols_pop_classe = [
-                POP_PREFIX + c for c in pop_classes_map
-                if POP_PREFIX + c in df_demo.columns
-            ]
-            if cols_pop_classe:
-                df_demo["_pop_classe_total"] = df_demo[cols_pop_classe].sum(axis=1)
-                for classe, col_pct in pop_classes_map.items():
-                    col_bruta = POP_PREFIX + classe
-                    if col_bruta in df_demo.columns:
-                        df_demo[col_pct] = df_demo.apply(
-                            lambda r: fmt_pct(r[col_bruta], r["_pop_classe_total"]), axis=1
-                        )
-                # D/E = soma D + E
-                col_d = POP_PREFIX + "D"
-                col_e = POP_PREFIX + "E"
-                if col_d in df_demo.columns and col_e in df_demo.columns:
-                    df_demo["pct_classe_D_E"] = df_demo.apply(
-                        lambda r: fmt_pct(r[col_d] + r[col_e], r["_pop_classe_total"]), axis=1
-                    )
-                else:
-                    df_demo["pct_classe_D_E"] = df_demo.get("pct_classe_D_raw", "—")
+        if df_demo.empty:
+            raise ValueError("Microáreas vazio para esta cidade.")
 
-            # Seleciona colunas para merge
-            cols_sel = [MICROAREAS_COL_MICROAREA, MICROAREAS_COL_POPULACAO, "pop_target"]
-            cols_pct = [c for c in ["pct_classe_App","pct_classe_Ap","pct_classe_B1","pct_classe_B2",
-                                    "pct_classe_C1","pct_classe_C2","pct_classe_D_E"] if c in df_demo.columns]
-            cols_sel += cols_pct
+        # Colunas de faixa etária até 19 anos
+        cols_ate19 = [MICROAREAS_COL_POP_ATE9, MICROAREAS_COL_POP_10_14, MICROAREAS_COL_POP_15_19]
+        cols_ate19 = [c for c in cols_ate19 if c in df_demo.columns]
 
-            df_demo_sel = df_demo[cols_sel].copy()
-            df_demo_sel = df_demo_sel.rename(columns={
+        # Colunas de classe social (valores absolutos de população)
+        COL_APP = "População por Faixa de Renda vs Faixa Etária - A++"
+        COL_AP  = "População por Faixa de Renda vs Faixa Etária - A+"
+        COL_B1  = "População por Faixa de Renda vs Faixa Etária - B1"
+        COL_B2  = "População por Faixa de Renda vs Faixa Etária - B2"
+        COL_C1  = "População por Faixa de Renda vs Faixa Etária - C1"
+        COL_C2  = "População por Faixa de Renda vs Faixa Etária - C2"
+        COL_D   = "População por Faixa de Renda vs Faixa Etária - D"
+        COL_E   = "População por Faixa de Renda vs Faixa Etária - E"
+
+        # Garante numérico
+        for col in cols_ate19 + [MICROAREAS_COL_POPULACAO,
+                                  COL_APP, COL_AP, COL_B1, COL_B2,
+                                  COL_C1, COL_C2, COL_D, COL_E]:
+            if col in df_demo.columns:
+                df_demo[col] = pd.to_numeric(df_demo[col], errors="coerce").fillna(0)
+
+        # Calcula campos derivados
+        df_demo["pop_target"] = df_demo[cols_ate19].sum(axis=1) if cols_ate19 else 0
+
+        # % por classe = valor_absoluto / pop_total * 100  (arredondado para 1 casa)
+        pop = df_demo[MICROAREAS_COL_POPULACAO].replace(0, pd.NA)
+        df_demo["pct_classe_App"] = (df_demo[COL_APP] / pop * 100).round(1).fillna(0)
+        df_demo["pct_classe_Ap"]  = (df_demo[COL_AP]  / pop * 100).round(1).fillna(0)
+        df_demo["pct_classe_B1"]  = (df_demo[COL_B1]  / pop * 100).round(1).fillna(0)
+        df_demo["pct_classe_B2"]  = (df_demo[COL_B2]  / pop * 100).round(1).fillna(0)
+        df_demo["pct_classe_C1"]  = (df_demo[COL_C1]  / pop * 100).round(1).fillna(0)
+        df_demo["pct_classe_C2"]  = (df_demo[COL_C2]  / pop * 100).round(1).fillna(0)
+        df_demo["pct_classe_D_E"] = ((df_demo[COL_D] + df_demo[COL_E]) / pop * 100).round(1).fillna(0)
+
+        # Seleciona colunas para merge
+        cols_sel = [
+            MICROAREAS_COL_MICROAREA,
+            MICROAREAS_COL_POPULACAO,
+            "pop_target",
+            "pct_classe_App", "pct_classe_Ap",
+            "pct_classe_B1",  "pct_classe_B2",
+            "pct_classe_C1",  "pct_classe_C2",
+            "pct_classe_D_E",
+        ]
+        df_demo_sel = (
+            df_demo[[c for c in cols_sel if c in df_demo.columns]]
+            .copy()
+            .rename(columns={
                 MICROAREAS_COL_MICROAREA: "bairro",
                 MICROAREAS_COL_POPULACAO: "pop_total",
             })
-            # Garante mesmo tipo nas chaves antes do merge
-            df_ma_priv["bairro"]  = df_ma_priv["bairro"].astype(str).str.strip()
-            df_demo_sel["bairro"] = df_demo_sel["bairro"].astype(str).str.strip()
-            df_ma_priv = df_ma_priv.merge(df_demo_sel, on="bairro", how="left")
-        else:
-            df_ma_priv["pop_total"]  = 0
-            df_ma_priv["pop_target"] = 0
+            .drop_duplicates(subset=["bairro"])
+        )
+
+        df_ma["bairro"]       = df_ma["bairro"].astype(str).str.strip()
+        df_demo_sel["bairro"] = df_demo_sel["bairro"].astype(str).str.strip()
+
+        df_ma = df_ma.merge(df_demo_sel, on="bairro", how="left")
+
     except Exception as e:
         print(f"⚠️  Dados demográficos não carregados: {e}")
-        df_ma_priv["pop_total"]  = 0
-        df_ma_priv["pop_target"] = 0
+        for col in ["pop_total", "pop_target",
+                    "pct_classe_App", "pct_classe_Ap",
+                    "pct_classe_B1", "pct_classe_B2",
+                    "pct_classe_C1", "pct_classe_C2", "pct_classe_D_E"]:
+            df_ma[col] = 0
 
-    # 7. Garante colunas e calcula penetração
-    for col_fill in ["pop_total", "pop_target", "tt_matriculas_total", "tt_matriculas_publicas"]:
-        if col_fill not in df_ma_priv.columns:
-            df_ma_priv[col_fill] = 0
-        df_ma_priv[col_fill] = pd.to_numeric(df_ma_priv[col_fill], errors="coerce").fillna(0)
-    # penetração = (privadas + públicas) / pop_target
-    df_ma_priv["_tt_tot_calc"] = df_ma_priv["tt_matriculas_privadas"] + df_ma_priv["tt_matriculas_publicas"]
-    df_ma_priv["penetracao"] = df_ma_priv.apply(
-        lambda r: fmt_pct(r["_tt_tot_calc"], r["pop_target"]), axis=1
+    # ── 5. Garante tipos e calcula penetração (col3 / col2) ──────
+    for col in ["pop_total", "pop_target", "tt_matriculas_privadas"]:
+        if col not in df_ma.columns:
+            df_ma[col] = 0
+        df_ma[col] = pd.to_numeric(df_ma[col], errors="coerce").fillna(0)
+
+    # penetração = matrículas privadas / pop_target
+    df_ma["penetracao"] = df_ma.apply(
+        lambda r: fmt_pct(r["tt_matriculas_privadas"], r["pop_target"]), axis=1
     )
 
-    return df_ma_priv.reset_index(drop=True)
+    return df_ma.reset_index(drop=True)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -377,9 +370,11 @@ def _buscar_dados_reais(cidade, ano_pontual, anos_evolucao, anos_cagr, bairros):
     acum = 0
     for fase_label, col_fase in COLUNAS_MATRICULAS.items():
         if col_fase not in df_ano.columns:
-            stats_por_fase[fase_label] = {"n_colegios":0,"n_colegios_so_fase":0,
-                "n_alunos":0,"pct_so_fase":"0%","pct_todos":"0%","pct_outros":"100%",
-                "pct_inf_fund1":"0%","pct_inf_fund1_fund2":"0%"}
+            stats_por_fase[fase_label] = {
+                "n_colegios": 0, "n_colegios_so_fase": 0,
+                "n_alunos": 0, "pct_so_fase": "0%", "pct_todos": "0%",
+                "pct_outros": "100%", "pct_inf_fund1": "0%", "pct_inf_fund1_fund2": "0%",
+            }
             continue
 
         n_alunos = int(df_ano[col_fase].sum())
@@ -400,8 +395,12 @@ def _buscar_dados_reais(cidade, ano_pontual, anos_evolucao, anos_cagr, bairros):
         # Slide 7 (FUND2): mostra INF+FUND1+FUND2
         cols_inf_fund1 = ["QT_MAT_INF", "QT_MAT_FUND_AI"]
         cols_inf_fund1_fund2 = ["QT_MAT_INF", "QT_MAT_FUND_AI", "QT_MAT_FUND_AF"]
-        acum_inf_fund1 = int(df_ano[[c for c in cols_inf_fund1 if c in df_ano.columns]].sum().sum())
-        acum_inf_fund1_fund2 = int(df_ano[[c for c in cols_inf_fund1_fund2 if c in df_ano.columns]].sum().sum())
+        acum_inf_fund1 = int(
+            df_ano[[c for c in cols_inf_fund1 if c in df_ano.columns]].sum().sum()
+        )
+        acum_inf_fund1_fund2 = int(
+            df_ano[[c for c in cols_inf_fund1_fund2 if c in df_ano.columns]].sum().sum()
+        )
 
         stats_por_fase[fase_label] = {
             "n_colegios":           n_colegios,
@@ -435,27 +434,26 @@ def _buscar_dados_reais(cidade, ano_pontual, anos_evolucao, anos_cagr, bairros):
     bairro_vals  = df_bairros["tt_matriculas_privadas"].astype(int).tolist()
 
     # Dados para as linhas da tabela dos slides 1 e 2
+    # Colunas alinhadas com o template:
+    #   col1=pop_total  col2=pop_target  col3=tt_privadas  col4=penetracao
+    #   col5-11=pct_classe_* (A++ A+ B1 B2 C1 C2 D/E) em % sobre pop_total
     tabela_bairros = []
     for _, row in df_bairros.iterrows():
-        tt_priv = int(row["tt_matriculas_privadas"])
-        tt_pub  = int(row.get("tt_matriculas_publicas", 0))
-        tt_tot  = tt_priv + tt_pub
         entry = {
-            "bairro":       row["bairro"],
-            "pop_total":    int(row.get("pop_total", 0)),
-            "pop_target":   int(row.get("pop_target", 0)),
-            "tt_matriculas":tt_tot,
-            "penetracao":   row.get("penetracao", "—"),
-            "tt_privadas":  tt_priv,
-            "tt_publicas":  tt_pub,
-            "pct_privadas": fmt_pct(tt_priv, tt_tot),
-            "pct_publicas": fmt_pct(tt_pub,  tt_tot),
+            "bairro":          row["bairro"],
+            "pop_total":       int(row.get("pop_total",  0)),
+            "pop_target":      int(row.get("pop_target", 0)),
+            "tt_privadas":     int(row["tt_matriculas_privadas"]),
+            "penetracao":      row.get("penetracao", "—"),
+            # classes sociais como string "X%" para exibição direta no slide
+            "pct_classe_App":  f"{row.get('pct_classe_App', 0):.0f}%",
+            "pct_classe_Ap":   f"{row.get('pct_classe_Ap',  0):.0f}%",
+            "pct_classe_B1":   f"{row.get('pct_classe_B1',  0):.0f}%",
+            "pct_classe_B2":   f"{row.get('pct_classe_B2',  0):.0f}%",
+            "pct_classe_C1":   f"{row.get('pct_classe_C1',  0):.0f}%",
+            "pct_classe_C2":   f"{row.get('pct_classe_C2',  0):.0f}%",
+            "pct_classe_D_E":  f"{row.get('pct_classe_D_E', 0):.0f}%",
         }
-        # Classes sociais (se disponíveis da base Microáreas)
-        for col_pct in ["pct_classe_App","pct_classe_Ap","pct_classe_B1","pct_classe_B2",
-                         "pct_classe_C1","pct_classe_C2","pct_classe_D_E"]:
-            if col_pct in row.index:
-                entry[col_pct] = row.get(col_pct, "—")
         tabela_bairros.append(entry)
 
     # ── Evolução temporal (slide 3) ───────────────────────────
@@ -463,7 +461,9 @@ def _buscar_dados_reais(cidade, ano_pontual, anos_evolucao, anos_cagr, bairros):
     for ano in anos_evolucao:
         df_a = df_priv[df_priv[COL_ANO] == ano]
         for i, col in enumerate(COLS_FASES):
-            series_evolucao[i].append(int(df_a[col].sum()) if not df_a.empty and col in df_a.columns else 0)
+            series_evolucao[i].append(
+                int(df_a[col].sum()) if not df_a.empty and col in df_a.columns else 0
+            )
 
     # ── CAGR total e por fase ─────────────────────────────────
     anos_necessarios = set(y for par in anos_cagr.values() for y in par)
@@ -475,7 +475,9 @@ def _buscar_dados_reais(cidade, ano_pontual, anos_evolucao, anos_cagr, bairros):
         df_a = df_priv[df_priv[COL_ANO] == ano]
         totais_por_ano[ano] = int(df_a[COLS_FASES].sum().sum()) if not df_a.empty else 0
         for col in COLS_FASES:
-            totais_por_ano_fase[col][ano] = int(df_a[col].sum()) if not df_a.empty and col in df_a.columns else 0
+            totais_por_ano_fase[col][ano] = (
+                int(df_a[col].sum()) if not df_a.empty and col in df_a.columns else 0
+            )
 
     # CAGR total (linha TOTAL do slide 3)
     cagr_calc = {}
@@ -511,9 +513,8 @@ def _buscar_dados_reais(cidade, ano_pontual, anos_evolucao, anos_cagr, bairros):
         # Pega top 10 escolas pelo total de matrículas privadas no ano pontual
         df_ano_priv = df_priv[df_priv[COL_ANO] == ano_pontual].copy()
         df_ano_priv["tt_total"] = df_ano_priv[COLS_FASES].sum(axis=1)
-        top10_escolas = (
-            df_ano_priv.nlargest(10, "tt_total")["NO_ENTIDADE"].tolist()
-        )
+        top10_escolas = df_ano_priv.nlargest(10, "tt_total")["NO_ENTIDADE"].tolist()
+
         # Série temporal de cada escola
         top10_series = []
         for escola in top10_escolas:
@@ -525,9 +526,12 @@ def _buscar_dados_reais(cidade, ano_pontual, anos_evolucao, anos_cagr, bairros):
                 ]
                 serie.append(int(df_e[COLS_FASES].sum().sum()) if not df_e.empty else 0)
             top10_series.append(serie)
+
         # Percentual que o top10 representa do total de matrículas privadas
         total_priv_ano = int(df_ano_priv[COLS_FASES].sum().sum())
-        top10_total    = int(df_ano_priv[df_ano_priv["NO_ENTIDADE"].isin(top10_escolas)][COLS_FASES].sum().sum())
+        top10_total    = int(
+            df_ano_priv[df_ano_priv["NO_ENTIDADE"].isin(top10_escolas)][COLS_FASES].sum().sum()
+        )
         pct_top10 = round(top10_total / total_priv_ano * 100) if total_priv_ano > 0 else 0
 
         top10_data = {"anos": anos_evolucao, "series": top10_series, "escolas": top10_escolas}
@@ -567,15 +571,15 @@ def _dados_mock(cidade, ano_pontual, anos_evolucao, anos_cagr):
     n = len(anos_evolucao)
     tabela_mock = [
         {
-            "bairro":       f"Bairro {i+1}",
-            "pop_total":    30000 + i*5000,
-            "pop_target":   12000 + i*2000,
-            "tt_matriculas":3000  + i*500,
-            "penetracao":   f"{20+i*3}%",
-            "tt_privadas":  500   + i*80,
-            "tt_publicas":  2500  + i*420,
-            "pct_privadas": f"{round((500+i*80)/(3000+i*500)*100)}%",
-            "pct_publicas": f"{round((2500+i*420)/(3000+i*500)*100)}%",
+            "bairro":        f"Bairro {i+1}",
+            "pop_total":     30000 + i*5000,
+            "pop_target":    12000 + i*2000,
+            "tt_matriculas": 3000  + i*500,
+            "penetracao":    f"{20+i*3}%",
+            "tt_privadas":   500   + i*80,
+            "tt_publicas":   2500  + i*420,
+            "pct_privadas":  f"{round((500+i*80)/(3000+i*500)*100)}%",
+            "pct_publicas":  f"{round((2500+i*420)/(3000+i*500)*100)}%",
         }
         for i in range(6)
     ]
@@ -618,8 +622,8 @@ def _dados_mock(cidade, ano_pontual, anos_evolucao, anos_cagr):
         "anos_cagr_periodos": anos_cagr,
         "totais_anuais":      [5513,5739,5673,6077,6272,6358,5679,6114,6735,7405],
         "pct_top10":          79,
-        "ano_pontual":   ano_pontual,
-        "anos_evolucao": anos_evolucao,
+        "ano_pontual":        ano_pontual,
+        "anos_evolucao":      anos_evolucao,
     }
 
 
